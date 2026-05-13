@@ -1,4 +1,4 @@
-const MAIN_SHEET_NAME = PropertiesService.getScriptProperties().getProperty('MAIN_SHEET_NAME') || 'Contracts';
+const MAIN_SHEET_NAME = PropertiesService.getScriptProperties().getProperty('MAIN_SHEET_NAME') || 'Contract Links';
 const RENEWALS_SHEET_NAME = PropertiesService.getScriptProperties().getProperty('RENEWALS_SHEET_NAME') || 'Renewals';
 const GEMINI_API_KEY = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY') || '';
 const CONTRACT_GENERATOR_WEBHOOK_URL = PropertiesService.getScriptProperties().getProperty('CONTRACT_GENERATOR_WEBHOOK_URL') || '';
@@ -6,7 +6,7 @@ const ZOHO_SIGN_WEBHOOK_URL = PropertiesService.getScriptProperties().getPropert
 const ZOHO_STATUS_WEBHOOK_URL = PropertiesService.getScriptProperties().getProperty('ZOHO_STATUS_WEBHOOK_URL') || '';
 
 const MAIN_COLUMNS = [
-  'Name', 'Email', 'Phone', 'Contract Link', 'Signed PDF URL', 'Version',
+  'Name', 'Email', 'Phone', 'Contract Link', 'Zoho Request ID', 'Zoho Status', 'Zoho Sent At', 'Zoho Error', 'Signed PDF URL', 'Version',
   'Contract Signed On', 'Contract Start Date', 'Contract Validity', 'Contract Expiry Date', 'Days Left',
   'AI Scan Status', 'AI Scan Notes', 'Renewal Status', 'Renewal Sheet Row ID', 'Last Synced At', 'Notes'
 ];
@@ -14,9 +14,11 @@ const MAIN_COLUMNS = [
 const RENEWAL_COLUMNS = [
   'Renewal ID', 'Original Contract Row ID', 'Name', 'Email', 'Phone', 'Old Version', 'New Version',
   'Old Contract Link', 'Old Signed PDF URL', 'Old Expiry Date', 'Renewal Status', 'Renewal Started On',
-  'Editable Data JSON / Editable Fields', 'New Contract Link', 'New Zoho Request ID', 'New Zoho Status',
+  'Editable Data JSON', 'New Contract Link', 'New Zoho Request ID', 'New Zoho Status',
   'New Signed PDF URL', 'New Contract Signed On', 'New Contract Expiry Date', 'Notes', 'Error'
 ];
+
+const EDITABLE_DATA_HEADERS = ['Editable Data JSON', 'Editable Data JSON / Editable Fields'];
 
 const RENEWAL_FINAL_STATUSES = {
   SIGNED: 'Signed',
@@ -82,8 +84,10 @@ function handleMainSheetEdit_(e, sheet, row) {
   const value = String(e.value || '').trim();
   if (!isGoogleDriveLink_(value)) return;
 
-  if (!sheet.getRange(row, map['AI Scan Status']).getValue()) {
+  const previousValue = String(e.oldValue || '').trim();
+  if (!sheet.getRange(row, map['AI Scan Status']).getValue() || previousValue !== value) {
     sheet.getRange(row, map['AI Scan Status']).setValue('Pending');
+    sheet.getRange(row, map['AI Scan Notes']).setValue(previousValue && previousValue !== value ? 'Signed PDF URL changed. Pending rescan.' : 'Signed PDF detected. Pending AI scan.');
   }
   scanPendingContracts({ onlyRow: row, force: false });
 }
@@ -172,7 +176,7 @@ function getRenewals_() {
   const sheet = SpreadsheetApp.getActive().getSheetByName(RENEWALS_SHEET_NAME);
   const map = getHeaderMap_(sheet);
   return getRowsAsObjects_(sheet, map).map((row) => {
-    const editable = parseEditableFields_(row['Editable Data JSON / Editable Fields']);
+    const editable = parseEditableFields_(getEditableDataValue_(row));
     return {
       rowId: row.__rowId,
       renewalId: row['Renewal ID'] || '',
@@ -187,7 +191,7 @@ function getRenewals_() {
       oldExpiryDate: formatDateValue_(row['Old Expiry Date']),
       renewalStatus: row['Renewal Status'] || '',
       renewalStartedOn: formatDateValue_(row['Renewal Started On']),
-      editableDataJson: row['Editable Data JSON / Editable Fields'] || '',
+      editableDataJson: getEditableDataValue_(row),
       editableFields: editable,
       newContractLink: row['New Contract Link'] || '',
       newZohoRequestId: row['New Zoho Request ID'] || '',
@@ -207,7 +211,7 @@ function rescanWithAI_(rowId) {
   const sheet = SpreadsheetApp.getActive().getSheetByName(MAIN_SHEET_NAME);
   const map = getHeaderMap_(sheet);
   if (rowId < 2) throw new Error('Invalid row ID.');
-  sheet.getRange(rowId, map['AI Scan Status']).setValue('Pending');
+  sheet.getRange(rowId, map['AI Scan Status']).setValue('Rescan Requested');
   sheet.getRange(rowId, map['AI Scan Notes']).setValue('Manual rescan requested');
   scanPendingContracts({ onlyRow: rowId, force: true });
   return { ok: true };
@@ -265,7 +269,7 @@ function startRenewal_(rowId) {
   renewalValues[renewalMap['Old Expiry Date'] - 1] = row['Contract Expiry Date'] || '';
   renewalValues[renewalMap['Renewal Status'] - 1] = 'Draft Created';
   renewalValues[renewalMap['Renewal Started On'] - 1] = new Date();
-  renewalValues[renewalMap['Editable Data JSON / Editable Fields'] - 1] = editablePayload;
+  renewalValues[getEditableDataColumnIndex_(renewalMap) - 1] = editablePayload;
   renewalSheet.getRange(renewalRowId, 1, 1, renewalValues.length).setValues([renewalValues]);
 
   updateMainSheetRenewalState_(rowId, 'Draft Created', renewalRowId);
@@ -280,7 +284,7 @@ function updateRenewal_(rowId, updates) {
   const row = getRowObject_(sheet, map, rowId);
   if (isRenewalFinalStatus_(row['Renewal Status'])) throw new Error('Finalized renewals cannot be edited.');
 
-  const editable = parseEditableFields_(row['Editable Data JSON / Editable Fields']);
+  const editable = parseEditableFields_(getEditableDataValue_(row));
   const normalized = updates || {};
   const fields = ['name', 'email', 'phone', 'version', 'contractStartDate', 'contractValidity', 'contractExpiryDate', 'noKycRequired'];
   fields.forEach((field) => {
@@ -294,7 +298,7 @@ function updateRenewal_(rowId, updates) {
   if (Object.prototype.hasOwnProperty.call(normalized, 'phone')) sheet.getRange(rowId, map['Phone']).setValue(String(normalized.phone || ''));
   if (Object.prototype.hasOwnProperty.call(normalized, 'version')) sheet.getRange(rowId, map['New Version']).setValue(String(normalized.version || ''));
 
-  sheet.getRange(rowId, map['Editable Data JSON / Editable Fields']).setValue(JSON.stringify(editable));
+  sheet.getRange(rowId, getEditableDataColumnIndex_(map)).setValue(JSON.stringify(editable));
   sheet.getRange(rowId, map['Renewal Status']).setValue('Draft Updated');
   clearRenewalError_(sheet, map, rowId);
   setRenewalNote_(sheet, map, rowId, 'Renewal draft updated from dashboard.');
@@ -317,7 +321,7 @@ function triggerContractGenerator_(renewalRowId, isRegeneration) {
     return;
   }
 
-  const editableData = parseEditableFields_(row['Editable Data JSON / Editable Fields']);
+  const editableData = parseEditableFields_(getEditableDataValue_(row));
   renewalSheet.getRange(renewalRowId, map['Renewal Status']).setValue(isRegeneration ? 'Regenerating Contract' : 'Generating Contract');
   clearRenewalError_(renewalSheet, map, renewalRowId);
 
@@ -493,18 +497,25 @@ function scanPendingContracts(options) {
     .filter((row) => isGoogleDriveLink_(row['Signed PDF URL']))
     .filter((row) => {
       const status = String(row['AI Scan Status'] || '').trim();
-      return force || !status || status === 'Pending';
+      return force || !status || status === 'Pending' || status === 'Failed' || status === 'Rescan Requested';
     });
 
   rows.forEach((row) => {
     try {
       const scan = scanContractPdf_(String(row['Signed PDF URL']));
-      const expiryDate = parseDateValue_(scan.contractExpiryDate);
       const startDate = parseDateValue_(scan.contractStartDate);
       const signedOn = parseDateValue_(scan.contractSignedOn);
+      let expiryDate = parseDateValue_(scan.contractExpiryDate);
+      if (!expiryDate && startDate && scan.contractValidity) {
+        expiryDate = deriveExpiryDateFromValidity_(startDate, scan.contractValidity);
+      }
       const daysLeft = expiryDate ? calculateDaysLeft_(expiryDate) : '';
       const notes = [];
       if (scan.mismatchOrMissingInfo) notes.push(scan.mismatchOrMissingInfo);
+      if (!signedOn) notes.push('Contract signed date not confidently found.');
+      if (!startDate) notes.push('Contract start/effective date not confidently found.');
+      if (!scan.contractValidity) notes.push('Contract validity not confidently found.');
+      if (!expiryDate) notes.push('Contract expiry date could not be derived.');
       if (scan.talentName && row['Name'] && normalizeText_(scan.talentName) !== normalizeText_(row['Name'])) {
         notes.push('Talent name mismatch: sheet=' + row['Name'] + ' pdf=' + scan.talentName);
       }
@@ -516,10 +527,12 @@ function scanPendingContracts(options) {
       sheet.getRange(row.__rowId, map['Days Left']).setValue(daysLeft);
       sheet.getRange(row.__rowId, map['AI Scan Status']).setValue('Scanned');
       sheet.getRange(row.__rowId, map['AI Scan Notes']).setValue(notes.join(' | '));
+      sheet.getRange(row.__rowId, map['Renewal Status']).setValue(deriveRenewalStatus_(daysLeft, row['Renewal Status']));
       sheet.getRange(row.__rowId, map['Last Synced At']).setValue(new Date());
     } catch (error) {
       sheet.getRange(row.__rowId, map['AI Scan Status']).setValue('Failed');
       sheet.getRange(row.__rowId, map['AI Scan Notes']).setValue(error.message || 'Unknown scan error');
+      sheet.getRange(row.__rowId, map['Renewal Status']).setValue(deriveRenewalStatus_(valueToNumber_(row['Days Left']), row['Renewal Status']));
       sheet.getRange(row.__rowId, map['Last Synced At']).setValue(new Date());
     }
   });
@@ -536,7 +549,7 @@ function scanContractPdf_(signedPdfUrl) {
       role: 'user',
       parts: [
         {
-          text: 'Read this signed contract PDF and return only JSON with these exact keys: talentName, contractSignedOn, contractStartDate, contractValidity, contractExpiryDate, mismatchOrMissingInfo. Use ISO date format YYYY-MM-DD when possible. If uncertain, leave the field empty and explain in mismatchOrMissingInfo.'
+          text: 'Read this signed contract PDF. Return only strict JSON with these exact keys: talentName, contractSignedOn, contractStartDate, contractValidity, contractExpiryDate, mismatchOrMissingInfo. Rules: contractSignedOn should be the actual signing/completion date if visible in the signed contract or certificate; contractStartDate should be the agreement/effective/start date mentioned in the contract; contractValidity should be the exact validity term text like "3 years" if visible; contractExpiryDate should be the final expiry date if explicitly visible, otherwise leave empty; mismatchOrMissingInfo should briefly note uncertainty, missing dates, unreadable pages, or mismatch warnings. Use ISO YYYY-MM-DD whenever possible. Do not include markdown or extra text.'
         },
         {
           inlineData: {
@@ -569,8 +582,9 @@ function syncDerivedFields_() {
   const map = getHeaderMap_(sheet);
   getRowsAsObjects_(sheet, map).forEach((row) => {
     const expiryDate = parseDateValue_(row['Contract Expiry Date']);
-    if (!expiryDate) return;
-    sheet.getRange(row.__rowId, map['Days Left']).setValue(calculateDaysLeft_(expiryDate));
+    const daysLeft = expiryDate ? calculateDaysLeft_(expiryDate) : '';
+    sheet.getRange(row.__rowId, map['Days Left']).setValue(daysLeft);
+    sheet.getRange(row.__rowId, map['Renewal Status']).setValue(deriveRenewalStatus_(daysLeft === '' ? valueToNumber_(row['Days Left']) : daysLeft, row['Renewal Status']));
   });
 }
 
@@ -608,7 +622,7 @@ function finalizeRenewalToMain_(renewalRowId, context) {
   const originalRowId = Number(renewalRow['Original Contract Row ID']);
   if (originalRowId < 2) throw new Error('Renewal is missing original contract row ID.');
 
-  const editable = parseEditableFields_(renewalRow['Editable Data JSON / Editable Fields']);
+  const editable = parseEditableFields_(getEditableDataValue_(renewalRow));
   const status = isGoogleDriveLink_(renewalRow['New Signed PDF URL']) ? RENEWAL_FINAL_STATUSES.SIGNED : String(renewalRow['Renewal Status'] || '').trim() || RENEWAL_FINAL_STATUSES.RENEWED;
   const targetRowId = findOrCreateMainRowForRenewal_(mainSheet, mainMap, renewalRow, editable);
 
@@ -616,6 +630,9 @@ function finalizeRenewalToMain_(renewalRowId, context) {
   mainSheet.getRange(targetRowId, mainMap['Email']).setValue(editable.email || renewalRow['Email'] || '');
   mainSheet.getRange(targetRowId, mainMap['Phone']).setValue(editable.phone || renewalRow['Phone'] || '');
   mainSheet.getRange(targetRowId, mainMap['Contract Link']).setValue(renewalRow['New Contract Link'] || '');
+  if (mainMap['Zoho Request ID']) mainSheet.getRange(targetRowId, mainMap['Zoho Request ID']).setValue(renewalRow['New Zoho Request ID'] || '');
+  if (mainMap['Zoho Status']) mainSheet.getRange(targetRowId, mainMap['Zoho Status']).setValue(renewalRow['New Zoho Status'] || status);
+  if (mainMap['Zoho Error']) mainSheet.getRange(targetRowId, mainMap['Zoho Error']).setValue('');
   mainSheet.getRange(targetRowId, mainMap['Signed PDF URL']).setValue(renewalRow['New Signed PDF URL'] || '');
   mainSheet.getRange(targetRowId, mainMap['Version']).setValue(editable.version || renewalRow['New Version'] || '');
   mainSheet.getRange(targetRowId, mainMap['Contract Signed On']).setValue(parseDateValue_(renewalRow['New Contract Signed On']) || '');
@@ -686,6 +703,21 @@ function parseEditableFields_(value) {
   const parsed = safeJsonParse_(value);
   if (parsed && typeof parsed === 'object') return parsed;
   return {};
+}
+
+function getEditableDataColumnIndex_(map) {
+  for (var i = 0; i < EDITABLE_DATA_HEADERS.length; i++) {
+    if (map[EDITABLE_DATA_HEADERS[i]]) return map[EDITABLE_DATA_HEADERS[i]];
+  }
+  throw new Error('Missing editable data column in Renewals sheet.');
+}
+
+function getEditableDataValue_(row) {
+  for (var i = 0; i < EDITABLE_DATA_HEADERS.length; i++) {
+    var header = EDITABLE_DATA_HEADERS[i];
+    if (Object.prototype.hasOwnProperty.call(row, header) && row[header]) return row[header];
+  }
+  return '';
 }
 
 function validateRenewalRowId_(rowId) {
@@ -800,6 +832,27 @@ function deriveStatusTone_(daysLeft) {
   if (daysLeft < 30) return 'urgent';
   if (daysLeft <= 90) return 'due-soon';
   return 'active';
+}
+
+function deriveRenewalStatus_(daysLeft, currentStatus) {
+  const status = String(currentStatus || '').trim();
+  if (status === 'Renewal Started' || status === 'Renewed' || status === 'On Hold' || status === 'Not Renewing') return status;
+  if (daysLeft === null || daysLeft === '' || typeof daysLeft !== 'number' || isNaN(daysLeft)) return status || '';
+  if (daysLeft < 0) return 'Expired';
+  if (daysLeft <= 90) return 'Due Soon';
+  return 'Not Due';
+}
+
+function deriveExpiryDateFromValidity_(startDate, validityText) {
+  const text = String(validityText || '').trim().toLowerCase();
+  if (!text || !startDate) return null;
+  const yearMatch = text.match(/(\d+)\s*(year|years|yr|yrs)/i);
+  if (yearMatch) return new Date(startDate.getFullYear() + Number(yearMatch[1]), startDate.getMonth(), startDate.getDate());
+  const monthMatch = text.match(/(\d+)\s*(month|months)/i);
+  if (monthMatch) return new Date(startDate.getFullYear(), startDate.getMonth() + Number(monthMatch[1]), startDate.getDate());
+  const dayMatch = text.match(/(\d+)\s*(day|days)/i);
+  if (dayMatch) return new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate() + Number(dayMatch[1]));
+  return null;
 }
 
 function extractDriveFileId_(url) {

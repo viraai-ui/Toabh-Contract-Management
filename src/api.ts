@@ -13,7 +13,11 @@ async function parseResponse(response: Response) {
   if (!response.ok) {
     throw new Error(`Request failed with status ${response.status}`)
   }
-  return response.json()
+  const payload = await response.json()
+  if (payload && payload.ok === false) {
+    throw new Error(payload.message || 'Request failed.')
+  }
+  return payload
 }
 
 export async function fetchDashboardData(filter: ExpiringFilter, from?: string, to?: string): Promise<DashboardPayload> {
