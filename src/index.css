@@ -113,10 +113,15 @@ button {
 .toolbar-group,
 .secondary-toolbar,
 .row-links,
-.modal-actions {
+.modal-actions,
+.actions-stack {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.actions-stack {
+  align-items: flex-start;
 }
 
 .premium-tabs {
@@ -277,6 +282,15 @@ button {
   border-radius: 14px;
   padding: 0 12px;
   background: #ffffff;
+}
+
+td input {
+  min-height: 38px;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 0 10px;
+  background: #ffffff;
+  width: 100%;
 }
 
 .table-wrap {

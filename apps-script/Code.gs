@@ -21,10 +21,11 @@ const RENEWAL_COLUMNS = [
 const EDITABLE_DATA_HEADERS = ['Editable Data JSON', 'Editable Data JSON / Editable Fields'];
 
 const RENEWAL_FINAL_STATUSES = {
-  SIGNED: 'Signed',
-  RENEWED: 'Renewed',
+  SIGNED: 'Signed/Renewed',
+  RENEWED: 'Signed/Renewed',
   CANCELLED: 'Cancelled',
-  ON_HOLD: 'On Hold'
+  ON_HOLD: 'On Hold',
+  NOT_RENEWING: 'Not Renewing'
 };
 
 function setupSheetsAndTriggers() {
@@ -136,7 +137,9 @@ function doPost(e) {
       case 'startRenewal':
         return jsonOutput_(startRenewal_(Number(body.rowId)));
       case 'addNote':
-        return jsonOutput_(addNote_(Number(body.rowId), String(body.note || '')));
+        return jsonOutput_(addNote_(Number(body.rowId), String(body.note || ''), String(body.scope || 'main')));
+      case 'setContractRenewalStatus':
+        return jsonOutput_(setContractRenewalStatus_(Number(body.rowId), String(body.status || ''), String(body.note || '')));
       case 'updateRenewal':
         return jsonOutput_(updateRenewal_(Number(body.rowId), body.updates || {}));
       case 'regenerateRenewalContract':
@@ -151,6 +154,8 @@ function doPost(e) {
         return jsonOutput_(markRenewalRenewed_(Number(body.rowId), body));
       case 'setRenewalOnHold':
         return jsonOutput_(setRenewalOnHold_(Number(body.rowId), String(body.note || '')));
+      case 'setRenewalNotRenewing':
+        return jsonOutput_(setRenewalNotRenewing_(Number(body.rowId), String(body.note || '')));
       case 'cancelRenewal':
         return jsonOutput_(cancelRenewal_(Number(body.rowId), String(body.note || '')));
       default:
@@ -217,15 +222,27 @@ function rescanWithAI_(rowId) {
   return { ok: true };
 }
 
-function addNote_(rowId, note) {
-  const sheet = SpreadsheetApp.getActive().getSheetByName(MAIN_SHEET_NAME);
+function addNote_(rowId, note, scope) {
+  const isRenewal = scope === 'renewal';
+  const sheet = SpreadsheetApp.getActive().getSheetByName(isRenewal ? RENEWALS_SHEET_NAME : MAIN_SHEET_NAME);
   const map = getHeaderMap_(sheet);
   const current = String(sheet.getRange(rowId, map['Notes']).getValue() || '').trim();
   const stamped = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm');
   const next = current ? current + '\n' + '[' + stamped + '] ' + note : '[' + stamped + '] ' + note;
   sheet.getRange(rowId, map['Notes']).setValue(next);
-  sheet.getRange(rowId, map['Last Synced At']).setValue(new Date());
+  if (!isRenewal && map['Last Synced At']) sheet.getRange(rowId, map['Last Synced At']).setValue(new Date());
   return { ok: true };
+}
+
+function setContractRenewalStatus_(rowId, status, note) {
+  const allowed = ['On Hold', 'Not Renewing'];
+  if (allowed.indexOf(status) === -1) throw new Error('Unsupported contract renewal status.');
+  const sheet = SpreadsheetApp.getActive().getSheetByName(MAIN_SHEET_NAME);
+  const map = getHeaderMap_(sheet);
+  sheet.getRange(rowId, map['Renewal Status']).setValue(status);
+  if (note) addNote_(rowId, note, 'main');
+  if (map['Last Synced At']) sheet.getRange(rowId, map['Last Synced At']).setValue(new Date());
+  return { ok: true, rowId: rowId, status: status };
 }
 
 function startRenewal_(rowId) {
@@ -299,10 +316,10 @@ function updateRenewal_(rowId, updates) {
   if (Object.prototype.hasOwnProperty.call(normalized, 'version')) sheet.getRange(rowId, map['New Version']).setValue(String(normalized.version || ''));
 
   sheet.getRange(rowId, getEditableDataColumnIndex_(map)).setValue(JSON.stringify(editable));
-  sheet.getRange(rowId, map['Renewal Status']).setValue('Draft Updated');
+  sheet.getRange(rowId, map['Renewal Status']).setValue('Edited');
   clearRenewalError_(sheet, map, rowId);
   setRenewalNote_(sheet, map, rowId, 'Renewal draft updated from dashboard.');
-  updateMainSheetRenewalState_(Number(row['Original Contract Row ID']), 'Draft Updated', rowId);
+  updateMainSheetRenewalState_(Number(row['Original Contract Row ID']), 'Renewal Started', rowId);
   return { ok: true, rowId: rowId };
 }
 
@@ -345,7 +362,7 @@ function triggerContractGenerator_(renewalRowId, isRegeneration) {
     });
 
     const payload = safeJsonParse_(response.getContentText()) || {};
-    const status = payload.status || (isRegeneration ? 'Contract Regenerated' : 'Contract Generated');
+    const status = payload.status || 'Contract Generated';
     renewalSheet.getRange(renewalRowId, map['Renewal Status']).setValue(status);
     if (payload.newContractLink) renewalSheet.getRange(renewalRowId, map['New Contract Link']).setValue(payload.newContractLink);
     if (payload.newZohoRequestId) renewalSheet.getRange(renewalRowId, map['New Zoho Request ID']).setValue(payload.newZohoRequestId);
@@ -392,10 +409,10 @@ function sendRenewalForSigning_(rowId) {
     });
     const payload = safeJsonParse_(response.getContentText()) || {};
     if (payload.newZohoRequestId) sheet.getRange(rowId, map['New Zoho Request ID']).setValue(payload.newZohoRequestId);
-    sheet.getRange(rowId, map['New Zoho Status']).setValue(payload.newZohoStatus || 'Sent for Signing');
-    sheet.getRange(rowId, map['Renewal Status']).setValue(payload.status || 'Sent for Signing');
+    sheet.getRange(rowId, map['New Zoho Status']).setValue(payload.newZohoStatus || 'Sent for Signature');
+    sheet.getRange(rowId, map['Renewal Status']).setValue(payload.status || 'Sent for Signature');
     setRenewalNote_(sheet, map, rowId, 'Renewal sent for signing.');
-    updateMainSheetRenewalState_(Number(row['Original Contract Row ID']), payload.status || 'Sent for Signing', rowId);
+    updateMainSheetRenewalState_(Number(row['Original Contract Row ID']), payload.status || 'Renewal Started', rowId);
     maybeFinalizeRenewal_(rowId, { source: 'send_for_signing' });
     return { ok: true, rowId: rowId, zohoRequestId: payload.newZohoRequestId || row['New Zoho Request ID'] || '' };
   } catch (error) {
@@ -476,6 +493,17 @@ function setRenewalOnHold_(rowId, note) {
   return { ok: true, rowId: rowId };
 }
 
+function setRenewalNotRenewing_(rowId, note) {
+  validateRenewalRowId_(rowId);
+  const sheet = SpreadsheetApp.getActive().getSheetByName(RENEWALS_SHEET_NAME);
+  const map = getHeaderMap_(sheet);
+  sheet.getRange(rowId, map['Renewal Status']).setValue(RENEWAL_FINAL_STATUSES.NOT_RENEWING);
+  if (note) setRenewalNote_(sheet, map, rowId, note);
+  const row = getRowObject_(sheet, map, rowId);
+  updateMainSheetRenewalState_(Number(row['Original Contract Row ID']), RENEWAL_FINAL_STATUSES.NOT_RENEWING, rowId);
+  return { ok: true, rowId: rowId };
+}
+
 function cancelRenewal_(rowId, note) {
   validateRenewalRowId_(rowId);
   const sheet = SpreadsheetApp.getActive().getSheetByName(RENEWALS_SHEET_NAME);
@@ -520,11 +548,25 @@ function scanPendingContracts(options) {
         notes.push('Talent name mismatch: sheet=' + row['Name'] + ' pdf=' + scan.talentName);
       }
 
-      sheet.getRange(row.__rowId, map['Contract Signed On']).setValue(signedOn || '');
-      sheet.getRange(row.__rowId, map['Contract Start Date']).setValue(startDate || '');
-      sheet.getRange(row.__rowId, map['Contract Validity']).setValue(scan.contractValidity || '');
-      sheet.getRange(row.__rowId, map['Contract Expiry Date']).setValue(expiryDate || '');
-      sheet.getRange(row.__rowId, map['Days Left']).setValue(daysLeft);
+      const writeResult = writeAiFields_(sheet, map, row.__rowId, {
+        contractSignedOn: signedOn,
+        contractStartDate: startDate,
+        contractValidity: scan.contractValidity || '',
+        contractExpiryDate: expiryDate,
+        daysLeft: daysLeft,
+      }, force, notes);
+
+      if (writeResult.mismatches.length) {
+        Array.prototype.push.apply(notes, writeResult.mismatches);
+      }
+
+      if (!expiryDate) {
+        sheet.getRange(row.__rowId, map['AI Scan Status']).setValue('Failed');
+        sheet.getRange(row.__rowId, map['AI Scan Notes']).setValue(notes.join(' | ') || 'Contract expiry date could not be confidently calculated.');
+        sheet.getRange(row.__rowId, map['Renewal Status']).setValue(deriveRenewalStatus_(valueToNumber_(row['Days Left']), row['Renewal Status']));
+        sheet.getRange(row.__rowId, map['Last Synced At']).setValue(new Date());
+        return;
+      }
       sheet.getRange(row.__rowId, map['AI Scan Status']).setValue('Scanned');
       sheet.getRange(row.__rowId, map['AI Scan Notes']).setValue(notes.join(' | '));
       sheet.getRange(row.__rowId, map['Renewal Status']).setValue(deriveRenewalStatus_(daysLeft, row['Renewal Status']));
@@ -646,7 +688,7 @@ function finalizeRenewalToMain_(renewalRowId, context) {
   mainSheet.getRange(targetRowId, mainMap['Last Synced At']).setValue(new Date());
   setMainNotesForRenewal_(mainSheet, mainMap, targetRowId, renewalRow, context);
 
-  renewalSheet.getRange(renewalRowId, renewalMap['Renewal Status']).setValue(status === RENEWAL_FINAL_STATUSES.SIGNED ? RENEWAL_FINAL_STATUSES.RENEWED : status);
+  renewalSheet.getRange(renewalRowId, renewalMap['Renewal Status']).setValue(RENEWAL_FINAL_STATUSES.RENEWED);
   clearRenewalError_(renewalSheet, renewalMap, renewalRowId);
   setRenewalNote_(renewalSheet, renewalMap, renewalRowId, 'Final contract synced to main Contracts sheet.');
   updateMainSheetRenewalState_(originalRowId, renewalSheet.getRange(renewalRowId, renewalMap['Renewal Status']).getValue(), renewalRowId);
@@ -726,7 +768,7 @@ function validateRenewalRowId_(rowId) {
 
 function isRenewalFinalStatus_(status) {
   const text = String(status || '').trim();
-  return text === RENEWAL_FINAL_STATUSES.SIGNED || text === RENEWAL_FINAL_STATUSES.RENEWED || text === RENEWAL_FINAL_STATUSES.CANCELLED;
+  return text === RENEWAL_FINAL_STATUSES.SIGNED || text === RENEWAL_FINAL_STATUSES.RENEWED || text === RENEWAL_FINAL_STATUSES.CANCELLED || text === RENEWAL_FINAL_STATUSES.NOT_RENEWING;
 }
 
 function setRenewalNote_(sheet, map, rowId, note) {
@@ -836,11 +878,42 @@ function deriveStatusTone_(daysLeft) {
 
 function deriveRenewalStatus_(daysLeft, currentStatus) {
   const status = String(currentStatus || '').trim();
-  if (status === 'Renewal Started' || status === 'Renewed' || status === 'On Hold' || status === 'Not Renewing') return status;
+  if (status === 'Renewal Started' || status === 'Signed/Renewed' || status === 'On Hold' || status === 'Not Renewing') return status;
   if (daysLeft === null || daysLeft === '' || typeof daysLeft !== 'number' || isNaN(daysLeft)) return status || '';
   if (daysLeft < 0) return 'Expired';
   if (daysLeft <= 90) return 'Due Soon';
   return 'Not Due';
+}
+
+function writeAiFields_(sheet, map, rowId, values, force, notes) {
+  const mismatches = [];
+  setAiField_(sheet, map, rowId, 'Contract Signed On', values.contractSignedOn, force, mismatches, notes);
+  setAiField_(sheet, map, rowId, 'Contract Start Date', values.contractStartDate, force, mismatches, notes);
+  setAiField_(sheet, map, rowId, 'Contract Validity', values.contractValidity, force, mismatches, notes);
+  setAiField_(sheet, map, rowId, 'Contract Expiry Date', values.contractExpiryDate, force, mismatches, notes);
+  setAiField_(sheet, map, rowId, 'Days Left', values.daysLeft, force, mismatches, notes);
+  return { mismatches: mismatches };
+}
+
+function setAiField_(sheet, map, rowId, header, nextValue, force, mismatches) {
+  var column = map[header];
+  if (!column) return;
+  var currentValue = sheet.getRange(rowId, column).getValue();
+  var normalizedCurrent = normalizeComparableValue_(currentValue);
+  var normalizedNext = normalizeComparableValue_(nextValue);
+  if (!force && normalizedCurrent && normalizedNext && normalizedCurrent !== normalizedNext) {
+    mismatches.push(header + ' mismatch: sheet=' + normalizedCurrent + ' ai=' + normalizedNext + '. Kept manual value.');
+    return;
+  }
+  if (!force && normalizedCurrent && !normalizedNext) return;
+  sheet.getRange(rowId, column).setValue(nextValue || '');
+}
+
+function normalizeComparableValue_(value) {
+  if (value === null || value === undefined || value === '') return '';
+  var parsed = parseDateValue_(value);
+  if (parsed) return Utilities.formatDate(parsed, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  return String(value).trim();
 }
 
 function deriveExpiryDateFromValidity_(startDate, validityText) {
