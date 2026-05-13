@@ -111,17 +111,9 @@ function runMaintenance() {
 function doGet(e) {
   ensureSheetColumns_();
   const params = e && e.parameter ? e.parameter : {};
-  const action = params.action || 'dashboard';
+  const action = String(params.action || 'contracts');
   try {
-    if (action === 'dashboard') {
-      return jsonOutput_({
-        ok: true,
-        contracts: getSignedContracts_(params.expiringFilter, params.from, params.to),
-        renewals: getRenewals_(),
-        generatedAt: new Date().toISOString()
-      });
-    }
-    return jsonOutput_({ ok: false, message: 'Unsupported action.' });
+    return handleGetAction_(action, params);
   } catch (error) {
     return jsonOutput_({ ok: false, message: error.message || 'Request failed.' });
   }
@@ -131,22 +123,35 @@ function doPost(e) {
   ensureSheetColumns_();
   try {
     const body = e && e.postData && e.postData.contents ? JSON.parse(e.postData.contents) : {};
-    switch (body.action) {
+    const params = e && e.parameter ? e.parameter : {};
+    const action = String(params.action || body.action || '');
+    switch (action) {
+      case 'add-contract':
+        return jsonOutput_(callLegacyFunction_('addContract', body));
+      case 'resend-contract':
+        return jsonOutput_(callLegacyFunction_('resendContractApi', body));
       case 'rescanWithAI':
+      case 'rescan-ai':
         return jsonOutput_(rescanWithAI_(Number(body.rowId)));
       case 'startRenewal':
+      case 'start-renewal':
         return jsonOutput_(startRenewal_(Number(body.rowId)));
       case 'addNote':
+      case 'update-note':
         return jsonOutput_(addNote_(Number(body.rowId), String(body.note || ''), String(body.scope || 'main')));
       case 'setContractRenewalStatus':
         return jsonOutput_(setContractRenewalStatus_(Number(body.rowId), String(body.status || ''), String(body.note || '')));
       case 'updateRenewal':
+      case 'update-renewal':
         return jsonOutput_(updateRenewal_(Number(body.rowId), body.updates || {}));
       case 'regenerateRenewalContract':
+      case 'generate-renewal-contract':
         return jsonOutput_(regenerateRenewalContract_(Number(body.rowId)));
       case 'sendRenewalForSigning':
+      case 'send-renewal-for-signing':
         return jsonOutput_(sendRenewalForSigning_(Number(body.rowId)));
       case 'refreshRenewalZohoStatus':
+      case 'refresh-renewal-status':
         return jsonOutput_(refreshRenewalZohoStatus_(Number(body.rowId)));
       case 'markRenewalSigned':
         return jsonOutput_(markRenewalSigned_(Number(body.rowId), body));
@@ -166,6 +171,49 @@ function doPost(e) {
   }
 }
 
+function handleGetAction_(action, params) {
+  if (action === 'dashboard') {
+    return jsonOutput_({
+      ok: true,
+      contracts: getSignedContracts_(params.expiringFilter, params.from, params.to),
+      renewals: getRenewals_(),
+      generatedAt: new Date().toISOString()
+    });
+  }
+
+  if (action === 'contracts') {
+    if (hasLegacyFunction_('getContracts')) return jsonOutput_(callLegacyFunction_('getContracts', params));
+    return jsonOutput_({ ok: true, contracts: getContractsForApi_(params) });
+  }
+
+  if (action === 'documents') {
+    if (hasLegacyFunction_('getDocuments')) return jsonOutput_(callLegacyFunction_('getDocuments', params));
+    return jsonOutput_({ ok: true, documents: {} });
+  }
+
+  if (action === 'documents_all') {
+    if (hasLegacyFunction_('getDocumentsAll')) return jsonOutput_(callLegacyFunction_('getDocumentsAll', params));
+    return jsonOutput_({ ok: true, documents: [] });
+  }
+
+  if (action === 'renewals') {
+    return jsonOutput_({ ok: true, renewals: getRenewals(), generatedAt: new Date().toISOString() });
+  }
+
+  return jsonOutput_({ ok: false, message: 'Unsupported action.' });
+}
+
+function hasLegacyFunction_(name) {
+  return typeof this[name] === 'function';
+}
+
+function callLegacyFunction_(name, payload) {
+  if (!hasLegacyFunction_(name)) {
+    throw new Error('Missing legacy handler: ' + name);
+  }
+  return this[name](payload || {});
+}
+
 function getSignedContracts_(expiringFilter, from, to) {
   const sheet = SpreadsheetApp.getActive().getSheetByName(MAIN_SHEET_NAME);
   const map = getHeaderMap_(sheet);
@@ -175,6 +223,38 @@ function getSignedContracts_(expiringFilter, from, to) {
     .filter((row) => isGoogleDriveLink_(row['Signed PDF URL']))
     .filter((row) => contractMatchesFilter_(row, expiringFilter, from, to))
     .map((row) => toContractRecord_(row, map));
+}
+
+function getContractsForApi_(params) {
+  var signedOnly = String((params && params.signedOnly) || '').trim() === '1';
+  const sheet = SpreadsheetApp.getActive().getSheetByName(MAIN_SHEET_NAME);
+  const map = getHeaderMap_(sheet);
+  return getRowsAsObjects_(sheet, map)
+    .filter((row) => !signedOnly || isGoogleDriveLink_(row['Signed PDF URL']))
+    .map((row) => ({
+      rowId: row.__rowId,
+      name: row['Name'] || '',
+      email: row['Email'] || '',
+      phone: row['Phone'] || '',
+      contractLink: row['Contract Link'] || '',
+      zohoRequestId: row['Zoho Request ID'] || '',
+      zohoStatus: row['Zoho Status'] || '',
+      zohoSentAt: formatDateValue_(row['Zoho Sent At'], true),
+      zohoError: row['Zoho Error'] || '',
+      signedPdfUrl: row['Signed PDF URL'] || '',
+      version: row['Version'] || '',
+      contractSignedOn: formatDateValue_(row['Contract Signed On']),
+      contractStartDate: formatDateValue_(row['Contract Start Date']),
+      contractValidity: row['Contract Validity'] || '',
+      contractExpiryDate: formatDateValue_(row['Contract Expiry Date']),
+      daysLeft: valueToNumber_(row['Days Left']),
+      aiScanStatus: row['AI Scan Status'] || '',
+      aiScanNotes: row['AI Scan Notes'] || '',
+      renewalStatus: row['Renewal Status'] || '',
+      renewalSheetRowId: row['Renewal Sheet Row ID'] || '',
+      lastSyncedAt: formatDateValue_(row['Last Synced At'], true),
+      notes: row['Notes'] || ''
+    }));
 }
 
 function getRenewals_() {
@@ -210,6 +290,10 @@ function getRenewals_() {
       isReadyForFinalization: shouldFinalizeRenewal_(row)
     };
   });
+}
+
+function getRenewals() {
+  return getRenewals_();
 }
 
 function rescanWithAI_(rowId) {

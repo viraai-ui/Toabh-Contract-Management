@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { Ban, CheckCircle2, ExternalLink, FilePenLine, FileText, PauseCircle, RefreshCcw, RefreshCw, RotateCw, Save, Search, Send, StickyNote } from 'lucide-react'
+import { Ban, CheckCircle2, ExternalLink, FilePenLine, FileText, MoreVertical, PauseCircle, RefreshCcw, RefreshCw, RotateCw, Save, Search, Send, StickyNote } from 'lucide-react'
 import { fetchDashboardData, postAction } from './api'
 import type { ContractRecord, ExpiringFilter, RenewalEditableFields, RenewalRecord, TabKey } from './types'
 
@@ -86,6 +86,36 @@ function ActionButton({ onClick, children, disabled = false }: { onClick: () => 
 
 function DataCell({ children }: { children: ReactNode }) {
   return <td>{children || '—'}</td>
+}
+
+function ActionMenu({ children }: { children: ReactNode }) {
+  const [open, setOpen] = useState(false)
+
+  useEffect(() => {
+    if (!open) return
+    function close() {
+      setOpen(false)
+    }
+    window.addEventListener('click', close)
+    return () => window.removeEventListener('click', close)
+  }, [open])
+
+  return (
+    <div className="menu-wrap" onClick={(event) => event.stopPropagation()}>
+      <button className={open ? 'menu-button active' : 'menu-button'} onClick={() => setOpen((value) => !value)} type="button">
+        <MoreVertical size={16} />
+      </button>
+      {open ? <div className="menu-panel">{children}</div> : null}
+    </div>
+  )
+}
+
+function MenuItem({ onClick, children, disabled = false, danger = false }: { onClick: () => void; children: ReactNode; disabled?: boolean; danger?: boolean }) {
+  return (
+    <button className={danger ? 'menu-item danger' : 'menu-item'} onClick={onClick} type="button" disabled={disabled}>
+      {children}
+    </button>
+  )
 }
 
 function parseEditableJson(value: string): RenewalEditableFields {
@@ -422,13 +452,13 @@ export default function App() {
                           </div>
                         </td>
                         <td>
-                          <div className="actions-stack">
-                            <ActionButton onClick={() => safeOpen(contract.contractLink)}><ExternalLink size={14} /> Original</ActionButton>
-                            <ActionButton onClick={() => safeOpen(contract.signedPdfUrl)}><ExternalLink size={14} /> Signed</ActionButton>
-                            <ActionButton onClick={() => void runAction('rescanWithAI', contract.rowId)} disabled={busyRow === `rescanWithAI-${contract.rowId}`}><RotateCw size={14} /> {busyRow === `rescanWithAI-${contract.rowId}` ? 'Working…' : 'Rescan with AI'}</ActionButton>
-                            <ActionButton onClick={() => void runAction('startRenewal', contract.rowId)} disabled={busyRow === `startRenewal-${contract.rowId}`}><FilePenLine size={14} /> {busyRow === `startRenewal-${contract.rowId}` ? 'Starting…' : 'Start Renewal'}</ActionButton>
-                            <ActionButton onClick={() => void addNote(contract.rowId)}><StickyNote size={14} /> Add/Edit Note</ActionButton>
-                          </div>
+                          <ActionMenu>
+                            <MenuItem onClick={() => safeOpen(contract.contractLink)}><ExternalLink size={14} /> Open Original Contract</MenuItem>
+                            <MenuItem onClick={() => safeOpen(contract.signedPdfUrl)}><ExternalLink size={14} /> Open Signed Contract</MenuItem>
+                            <MenuItem onClick={() => void runAction('rescanWithAI', contract.rowId)} disabled={busyRow === `rescanWithAI-${contract.rowId}`}><RotateCw size={14} /> Rescan with AI</MenuItem>
+                            <MenuItem onClick={() => void runAction('startRenewal', contract.rowId)} disabled={busyRow === `startRenewal-${contract.rowId}`}><FilePenLine size={14} /> Start Renewal</MenuItem>
+                            <MenuItem onClick={() => void addNote(contract.rowId)}><StickyNote size={14} /> Add/Edit Note</MenuItem>
+                          </ActionMenu>
                         </td>
                       </tr>
                     ))}
@@ -476,13 +506,13 @@ export default function App() {
                         <DataCell><button className="link-chip" onClick={() => safeOpen(contract.signedPdfUrl)} type="button">Open <ExternalLink size={14} /></button></DataCell>
                         <DataCell>{contract.renewalStatus || '—'}</DataCell>
                         <td>
-                          <div className="actions-stack">
-                            <ActionButton onClick={() => void runAction('startRenewal', contract.rowId)} disabled={busyRow === `startRenewal-${contract.rowId}`}><FilePenLine size={14} /> Renewal</ActionButton>
-                            <ActionButton onClick={() => safeOpen(contract.signedPdfUrl)}><ExternalLink size={14} /> Signed</ActionButton>
-                            <ActionButton onClick={() => void addNote(contract.rowId)}><StickyNote size={14} /> Note</ActionButton>
-                            <ActionButton onClick={() => void setMainRenewalStatus(contract.rowId, 'Not Renewing')}><Ban size={14} /> Not Renewing</ActionButton>
-                            <ActionButton onClick={() => void setMainRenewalStatus(contract.rowId, 'On Hold')}><PauseCircle size={14} /> On Hold</ActionButton>
-                          </div>
+                          <ActionMenu>
+                            <MenuItem onClick={() => void runAction('startRenewal', contract.rowId)} disabled={busyRow === `startRenewal-${contract.rowId}`}><FilePenLine size={14} /> Start Renewal</MenuItem>
+                            <MenuItem onClick={() => safeOpen(contract.signedPdfUrl)}><ExternalLink size={14} /> Open Signed Contract</MenuItem>
+                            <MenuItem onClick={() => void addNote(contract.rowId)}><StickyNote size={14} /> Add Note</MenuItem>
+                            <MenuItem onClick={() => void setMainRenewalStatus(contract.rowId, 'Not Renewing')} danger><Ban size={14} /> Mark Not Renewing</MenuItem>
+                            <MenuItem onClick={() => void setMainRenewalStatus(contract.rowId, 'On Hold')}><PauseCircle size={14} /> Put On Hold</MenuItem>
+                          </ActionMenu>
                         </td>
                       </tr>
                     ))}
@@ -563,27 +593,25 @@ export default function App() {
                           <DataCell>{renewal.newSignedPdfUrl ? <button className="link-chip" onClick={() => safeOpen(renewal.newSignedPdfUrl)} type="button">Open <ExternalLink size={14} /></button> : '—'}</DataCell>
                           <DataCell>{renewal.notes || '—'}</DataCell>
                           <td>
-                            <div className="actions-stack">
-                              {renewal.oldSignedPdfUrl ? <ActionButton onClick={() => safeOpen(renewal.oldSignedPdfUrl)}><ExternalLink size={14} /> Old Signed</ActionButton> : null}
-                              {isEditing ? (
-                                <>
-                                  <ActionButton onClick={() => void saveRenewal(renewal.rowId)} disabled={busyRow === `updateRenewal-${renewal.rowId}`}><Save size={14} /> Save</ActionButton>
-                                  <ActionButton onClick={cancelEditingRenewal}><Ban size={14} /> Cancel</ActionButton>
-                                </>
-                              ) : (
-                                <>
-                                  <ActionButton onClick={() => startEditingRenewal(renewal)} disabled={!renewal.canEdit}><FilePenLine size={14} /> Edit</ActionButton>
-                                  <ActionButton onClick={() => void runAction('regenerateRenewalContract', renewal.rowId)} disabled={!renewal.canEdit || busyRow === `regenerateRenewalContract-${renewal.rowId}`}><FileText size={14} /> Regenerate</ActionButton>
-                                  <ActionButton onClick={() => void runAction('sendRenewalForSigning', renewal.rowId)} disabled={!renewal.canEdit || busyRow === `sendRenewalForSigning-${renewal.rowId}`}><Send size={14} /> Send</ActionButton>
-                                  <ActionButton onClick={() => void runAction('refreshRenewalZohoStatus', renewal.rowId)} disabled={busyRow === `refreshRenewalZohoStatus-${renewal.rowId}`}><RefreshCw size={14} /> Refresh Zoho</ActionButton>
-                                  <ActionButton onClick={() => void runAction('markRenewalRenewed', renewal.rowId)}><CheckCircle2 size={14} /> Signed/Renewed</ActionButton>
-                                  <ActionButton onClick={() => void setRenewalStatus(renewal.rowId, 'setRenewalNotRenewing')}><Ban size={14} /> Not Renewing</ActionButton>
-                                  <ActionButton onClick={() => void setRenewalStatus(renewal.rowId, 'setRenewalOnHold')}><PauseCircle size={14} /> On Hold</ActionButton>
-                                  <ActionButton onClick={() => void setRenewalStatus(renewal.rowId, 'cancelRenewal')}><Ban size={14} /> Cancel</ActionButton>
-                                  <ActionButton onClick={() => void addNote(renewal.rowId, 'renewal')}><StickyNote size={14} /> Add/Edit Notes</ActionButton>
-                                </>
-                              )}
-                            </div>
+                            {isEditing ? (
+                              <div className="actions-stack">
+                                <ActionButton onClick={() => void saveRenewal(renewal.rowId)} disabled={busyRow === `updateRenewal-${renewal.rowId}`}><Save size={14} /> Save</ActionButton>
+                                <ActionButton onClick={cancelEditingRenewal}><Ban size={14} /> Cancel</ActionButton>
+                              </div>
+                            ) : (
+                              <ActionMenu>
+                                {renewal.oldSignedPdfUrl ? <MenuItem onClick={() => safeOpen(renewal.oldSignedPdfUrl)}><ExternalLink size={14} /> View Old Signed Contract</MenuItem> : null}
+                                <MenuItem onClick={() => startEditingRenewal(renewal)} disabled={!renewal.canEdit}><FilePenLine size={14} /> Edit Renewal Details</MenuItem>
+                                <MenuItem onClick={() => void runAction('regenerateRenewalContract', renewal.rowId)} disabled={!renewal.canEdit || busyRow === `regenerateRenewalContract-${renewal.rowId}`}><FileText size={14} /> Regenerate Contract</MenuItem>
+                                <MenuItem onClick={() => void runAction('sendRenewalForSigning', renewal.rowId)} disabled={!renewal.canEdit || busyRow === `sendRenewalForSigning-${renewal.rowId}`}><Send size={14} /> Send for Signing</MenuItem>
+                                <MenuItem onClick={() => void runAction('refreshRenewalZohoStatus', renewal.rowId)} disabled={busyRow === `refreshRenewalZohoStatus-${renewal.rowId}`}><RefreshCw size={14} /> Refresh Zoho Status</MenuItem>
+                                <MenuItem onClick={() => void runAction('markRenewalRenewed', renewal.rowId)}><CheckCircle2 size={14} /> Mark Signed/Renewed</MenuItem>
+                                <MenuItem onClick={() => void setRenewalStatus(renewal.rowId, 'setRenewalNotRenewing')} danger><Ban size={14} /> Mark Not Renewing</MenuItem>
+                                <MenuItem onClick={() => void setRenewalStatus(renewal.rowId, 'setRenewalOnHold')}><PauseCircle size={14} /> Put On Hold</MenuItem>
+                                <MenuItem onClick={() => void setRenewalStatus(renewal.rowId, 'cancelRenewal')} danger><Ban size={14} /> Cancel Renewal</MenuItem>
+                                <MenuItem onClick={() => void addNote(renewal.rowId, 'renewal')}><StickyNote size={14} /> Add/Edit Notes</MenuItem>
+                              </ActionMenu>
+                            )}
                           </td>
                         </tr>
                       )
